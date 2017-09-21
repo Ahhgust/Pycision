@@ -1,4 +1,14 @@
 #!/usr/bin/env python3
+# Written by August Woerner.
+# This program takes in a bed file (arg1), and a bunch of sorted bams
+# and it takes the intervals in the bed, and outputs a bunch of sorted, indexed bams
+# that only contain reads that span at least one of the intervals in the bed.
+# the reads are soft-clipped s.t. they correspond to *just* the positions specied.
+# In practice, you give it a bed file of places you want to look at that have been PCR'd
+# and an alignment that may include some/all of the primers
+# and this reduces everything to just the regions sequenced by the primers w/o including the primer
+# sequence itself.
+
 
 import os
 import sys
@@ -14,9 +24,10 @@ consumesReference = [True, False, True, True, False, False, False, True]
 # ditto for consuming the query
 consumesQuery = [True, True, False, False, True, False, False, True]
 
+VERSION = 0.0001
 
 def die(message=''):
-    sys.stderr.write( message + os.linesep + "Oops! Correct usage:" + os.linesep + sys.argv[0] + " bedFile bamFile1 (...)" + os.linesep )
+    sys.stderr.write( message + os.linesep + "Version number: " + VERSION + os.linesep + "Oops! Correct usage:" + os.linesep + sys.argv[0] + " bedFile bamFile1 (...)" + os.linesep )
     sys.exit(1)
 
 
@@ -136,12 +147,20 @@ def softclipBam(bamFile, bedRecs):
     prevPos = -1
     currIndex = 0
     bedLen = len(bedRecs)
+    previousStart = -1
     # just look at reads in the mito. (the coordinates used/ mito padding used are immaterial with this approach)
     for read in inBam.fetch(limits[0], limits[1], limits[2]):
         if (read.is_unmapped):
             continue
 
+        if (read.pos < previousStart):
+            die("File: " + bamFile + " does not appear to be sorted!" + read.pos + " vs " + previousStart)
+
+        previousStart = read.pos
         positions = getGenomeStartStop(read)
+
+        while (currIndex < bedLen and read.pos > bedRecs[currIndex][2]):
+            currIndex += 1
 
 # TODO: adjust currIndex, and stop coordinates (assuming bam is sorted)        
         for i in range(currIndex, bedLen):
@@ -152,6 +171,8 @@ def softclipBam(bamFile, bedRecs):
                 newread.cigartuples = newcig
                 newread.pos = rec[1] - 1 # soft clipping in front of read means we need to adjust the start coordinate. -1 b/c 0-based indexing in bam
                 outBam.write(newread)
+                break
+            elif positions[1] < rec[2]:
                 break
 
     inBam.close()
