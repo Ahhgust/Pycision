@@ -16,6 +16,8 @@ import pysam
 import csv
 import re
 import copy
+import argparse
+
 
 # global. from the sam file specificatio. bam codes that consume the reference sequence
 # taken from: https://samtools.github.io/hts-specs/SAMv1.pdf
@@ -27,7 +29,7 @@ consumesQuery = [True, True, False, False, True, False, False, True]
 VERSION = 0.0001
 
 def die(message=''):
-    sys.stderr.write( message + os.linesep + "Version number: " + VERSION + os.linesep + "Oops! Correct usage:" + os.linesep + sys.argv[0] + " bedFile bamFile1 (...)" + os.linesep )
+    sys.stderr.write( message + os.linesep + "Version number: " + str(VERSION) + os.linesep + "Oops! Correct usage:" + os.linesep + sys.argv[0] + " bedFile bamFile1 (...)" + os.linesep )
     sys.exit(1)
 
 
@@ -42,11 +44,12 @@ def getGenomeStartStop(read):
         if (consumesReference[cigarType]):
             currPos += cigarLength
 
-    return(genomeStart, currPos)
+    return(genomeStart, currPos-1)
 
 # performs soft clipping:
 # changes the cigar string in READ to clip out regions outside of the bedRec (1-based indexed)
-def makeSoftclippedCigar(read, genomePositions, bedRec):
+# of  trimLeft and trimRight, at least one must be true!
+def makeSoftclippedCigar(read, genomePositions, bedRec, trimLeft, trimRight):
 
     # number of bases in REFERENCE coordinates to the right to remove
     diffRight = genomePositions[1] - bedRec[2] 
@@ -55,7 +58,7 @@ def makeSoftclippedCigar(read, genomePositions, bedRec):
     ciggy = [list(elem) for elem in read.cigar ]
 
 # should never happen...
-    if diffRight <0:
+    if diffRight <0 and trimRight:
         die("Unexpected trim: " + read + genomePositions + bedRec)
 
 # trim to the right!    
@@ -86,8 +89,12 @@ def makeSoftclippedCigar(read, genomePositions, bedRec):
         if consumesQuery[t]: # both are true
             numQConsumed += diffRight # so reduce this cigarop accordingly
         
+
+        if diffRight < ciggy[-1][1]:
         # shrink the (now) last op to the position of the reference sequence marked in the bed record
-        ciggy[-1][1] -= diffRight
+            ciggy[-1][1] -= diffRight
+        else: # avoid creating 0-length cigar ops
+            ciggy.pop(-1)
 
         # and if query bases were lost, soft clip them
         if (numQConsumed > 0):
@@ -97,7 +104,9 @@ def makeSoftclippedCigar(read, genomePositions, bedRec):
 
 # and to the left!!
     diffLeft = bedRec[1] - genomePositions[0]
-    
+    if diffLeft <0 and trimLeft:
+        die("Unexpected trim: " + read + genomePositions + bedRec)
+
     if diffLeft > 0:
         numQConsumed = 0 # number of bases in the query (read) consumed
 
@@ -123,7 +132,11 @@ def makeSoftclippedCigar(read, genomePositions, bedRec):
         if consumesQuery[t]:
             numQConsumed += diffLeft # residual differences added
 
-        ciggy[0][1] -= diffLeft
+        if diffLeft < ciggy[0][1]:
+            ciggy[0][1] -= diffLeft
+        else:
+            ciggy.pop(0)
+
         if numQConsumed > 0:
             ciggy.insert(0, list( [4, numQConsumed] ) )
 
@@ -136,7 +149,7 @@ def makeSoftclippedCigar(read, genomePositions, bedRec):
 
 
 
-def softclipBam(bamFile, bedRecs):
+def softclipBam(bamFile, bedRecs, halfway):
     inBam = pysam.AlignmentFile(bamFile, "rb")
     outFile = re.sub('\.bam$', '.softClipped.bam', bamFile)
     outFileSorted = re.sub('\.bam$', '.softClipped.sorted.bam', bamFile)
@@ -162,44 +175,85 @@ def softclipBam(bamFile, bedRecs):
         while (currIndex < bedLen and read.pos > bedRecs[currIndex][2]):
             currIndex += 1
 
-# TODO: adjust currIndex, and stop coordinates (assuming bam is sorted)        
         for i in range(currIndex, bedLen):
             rec = bedRecs[i]
             if (positions[0] <= rec[1] and positions[1] >= rec[2]):
-                newcig = makeSoftclippedCigar(read, positions, rec)
+                newcig = makeSoftclippedCigar(read, positions, rec, True, True)
                 newread = copy.copy(read)
                 newread.cigartuples = newcig
                 newread.pos = rec[1] - 1 # soft clipping in front of read means we need to adjust the start coordinate. -1 b/c 0-based indexing in bam
                 outBam.write(newread)
+#                print("Both")
+                break
+            elif (halfway and positions[0] <= rec[1] and positions[1] >= rec[1]/2.0 + rec[2]/2.0): # to the left, to the left...
+                newcig = makeSoftclippedCigar(read, positions, rec, True, False)
+                newread = copy.copy(read)
+                newread.cigartuples = newcig
+                newread.pos = rec[1] - 1 # soft clipping in front of read means we need to adjust the start coordinate. -1 b/c 0-based indexing in bam
+                outBam.write(newread)
+ #               print("Left")
+                break
+            elif (halfway and positions[1] >= rec[2] and positions[0] <= rec[1]/2.0 + rec[2]/2.0): # to the right, to the right... everybody sing
+                newcig = makeSoftclippedCigar(read, positions, rec, False, True)
+                newread = copy.copy(read)
+                newread.cigartuples = newcig
+                #newread.pos = rec[1] - 1 # the right-hand position wasn't trimmed, so no need to adjust.
+                outBam.write(newread)
+  #              print("Right")
                 break
             elif positions[1] < rec[2]:
                 break
 
+   
     inBam.close()
     outBam.close()
-# sort and index the output files.
+    # sort and index the output files.
     pysam.sort("-o", outFileSorted, outFile)
     pysam.index(outFileSorted, outFileSorted + ".bai")
 
 
 if __name__ == "__main__":
-    args = sys.argv
-    if (len(args) < 3):
+
+    parser = argparse.ArgumentParser(description="Let's trim some bams!")
+
+    halfway=False
+    parser.add_argument('-f', '--fifty_percent', dest='halfway', help="Keeps reads that span to halfway through a region", action='store_true')
+
+    results = parser.parse_known_args(sys.argv[1:])[0]
+    halfway = results.halfway
+
+    if halfway:
+        args = sys.argv[2:]
+    else:
+        args = sys.argv[1:]
+
+
+    if (len(args) < 2):
+        parser.print_help()
         die("I need at least one bed file and one bam file!")
 
 # lazy person's bed file processing
-    dat = open(args[1], 'r')
+    dat = open(args[0], 'r')
     bedRecs = []
     reader = csv.reader(dat, delimiter='\t')
+    chrom =''
+
     for row in reader:
         if (row[0][0] != '#'):
             row[1] = int(row[1]) + 1 # change from 0-based half open coordinates to 1-based
             row[2] = int(row[2])
+            if chrom == '':
+                chrom = row[0]
+            elif chrom != row[0]:
+                parser.print_help()
+                die("At least two separate chromosomes detected\n" + chrom + "\nAnd\n" + row[0] + "\nThat's not good!!\n")
+
             bedRecs.append(row)
 
 # iterate over the bams, and soft clip them to just the regions
-    for f in args[2:]:
-        softclipBam(f, bedRecs)
+    for f in args[1:]:
+        print(f)
+        softclipBam(f, bedRecs, halfway)
         
 
 
