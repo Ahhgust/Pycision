@@ -151,8 +151,14 @@ def makeSoftclippedCigar(read, genomePositions, bedRec, trimLeft, trimRight):
 
 def softclipBam(bamFile, bedRecs, halfway):
     inBam = pysam.AlignmentFile(bamFile, "rb")
-    outFile = re.sub('\.bam$', '.softClipped.bam', bamFile)
-    outFileSorted = re.sub('\.bam$', '.softClipped.sorted.bam', bamFile)
+
+    if halfway:
+        outFile = re.sub('\.bam$', '.softClipped.halfway.bam', bamFile)
+        outFileSorted = re.sub('\.bam$', '.softClipped.halfway.sorted.bam', bamFile)
+    else:
+        outFile = re.sub('\.bam$', '.softClipped.bam', bamFile)
+        outFileSorted = re.sub('\.bam$', '.softClipped.sorted.bam', bamFile)
+
     outBam = pysam.AlignmentFile(outFile, "wb", template=inBam)
 
     limits = [bedRecs[0][0], bedRecs[0][1], bedRecs[-1][2]]
