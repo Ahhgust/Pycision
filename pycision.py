@@ -17,7 +17,7 @@ import csv
 import re
 import copy
 import argparse
-
+import operator
 
 # global. from the sam file specificatio. bam codes that consume the reference sequence
 # taken from: https://samtools.github.io/hts-specs/SAMv1.pdf
@@ -26,7 +26,13 @@ consumesReference = [True, False, True, True, False, False, False, True]
 # ditto for consuming the query
 consumesQuery = [True, True, False, False, True, False, False, True]
 
-VERSION = 0.0001
+VERSION = 0.001
+
+
+# global defaults
+
+haplotypes=0
+homopolymerCompression=False
 
 def die(message=''):
     sys.stderr.write( message + os.linesep + "Version number: " + str(VERSION) + os.linesep + "Oops! Correct usage:" + os.linesep + sys.argv[0] + " bedFile bamFile1 (...)" + os.linesep )
@@ -167,6 +173,11 @@ def softclipBam(bamFile, bedRecs, halfway):
     currIndex = 0
     bedLen = len(bedRecs)
     previousStart = -1
+
+# optionally record the marginal haplotypes
+    if haplotypes > 0:
+        haplotypeDictionary = [dict() for x in range(bedLen)]
+
     # just look at reads in the mito. (the coordinates used/ mito padding used are immaterial with this approach)
     for read in inBam.fetch(limits[0], limits[1], limits[2]):
         if (read.is_unmapped):
@@ -177,7 +188,7 @@ def softclipBam(bamFile, bedRecs, halfway):
 
         previousStart = read.pos
         positions = getGenomeStartStop(read)
-
+        newread=None
         while (currIndex < bedLen and read.pos > bedRecs[currIndex][2]):
             currIndex += 1
 
@@ -188,31 +199,94 @@ def softclipBam(bamFile, bedRecs, halfway):
                 newread = copy.copy(read)
                 newread.cigartuples = newcig
                 newread.pos = rec[1] - 1 # soft clipping in front of read means we need to adjust the start coordinate. -1 b/c 0-based indexing in bam
-                outBam.write(newread)
-#                print("Both")
+                if haplotypes > 0:
+                    hap = newread.query_alignment_sequence # from the docs: gets a substring of the query sequence, excluding bases that were soft-clipped
+                    # TODO: Haplotype homopolymer compression (HERE)
+                    
+                    if homopolymerCompression:
+                        l = len(hap)
+
+                        out = []
+                        prevc = hap[0]
+                        out.append( prevc )
+                        for x in range(1, l):
+                            c = hap[x]
+                            if c != prevc: # this character is not the same as its predecessor. Let's output it!
+                                out.append( c )
+                            prevc = c
+
+                        hap = ''.join(c for c in out)
+                        
+                    if haplotypeDictionary[i].has_key(hap):
+                        haplotypeDictionary[i][hap] += 1
+                    else:
+                        haplotypeDictionary[i][hap] = 1
+                        
+
                 break
-            elif (halfway and positions[0] <= rec[1] and positions[1] >= rec[1]/2.0 + rec[2]/2.0): # to the left, to the left...
+            elif (halfway and newread is None and positions[0] <= rec[1] and positions[1] >= rec[1]/2.0 + rec[2]/2.0 and not read.is_reverse): # to the left, to the left...
                 newcig = makeSoftclippedCigar(read, positions, rec, True, False)
                 newread = copy.copy(read)
                 newread.cigartuples = newcig
                 newread.pos = rec[1] - 1 # soft clipping in front of read means we need to adjust the start coordinate. -1 b/c 0-based indexing in bam
-                outBam.write(newread)
- #               print("Left")
-                break
-            elif (halfway and positions[1] >= rec[2] and positions[0] <= rec[1]/2.0 + rec[2]/2.0): # to the right, to the right... everybody sing
+#                break
+            elif (halfway and newread is None and positions[1] >= rec[2] and positions[0] <= rec[1]/2.0 + rec[2]/2.0 and read.is_reverse): # to the right, to the right... everybody sing
                 newcig = makeSoftclippedCigar(read, positions, rec, False, True)
                 newread = copy.copy(read)
                 newread.cigartuples = newcig
-                #newread.pos = rec[1] - 1 # the right-hand position wasn't trimmed, so no need to adjust.
-                outBam.write(newread)
-  #              print("Right")
-                break
+            
+ #               break
             elif positions[1] < rec[2]:
                 break
+        
 
-   
+        if not newread is None:
+            outBam.write(newread)
+ 
     inBam.close()
     outBam.close()
+
+
+    if haplotypes > 0:
+        if homopolymerCompression:
+            bedFileName = re.sub('\.bam$', '.HomopolymerCompressed.bed', bamFile)
+        else:
+            bedFileName = re.sub('\.bam$', '.bed', bamFile)
+
+        bedFile = open(bedFileName, "w")
+# write the file header.
+        bedFile.write("#Chrom\tStart\tStop\tFilename")
+        for i in range(0, haplotypes):
+            bedFile.write("\tHap"+str(i)+"\tCount"+str(i))
+            
+        bedFile.write("\tLeftoverCount\n")
+
+
+        for i in range(0, bedLen):
+            rec = bedRecs[i]
+            bedFile.write(rec[0] + "\t" + str(rec[1]) + "\t" + str(rec[2]) + "\t" + bamFile)
+            haps = sorted(haplotypeDictionary[i].items(), key=operator.itemgetter(1), reverse=True)
+
+
+            j = 0
+            leftovers=0
+# write out the most frequent haplotypes (ties broken arbitrarily)
+            for k, v in haps:
+                j += 1
+                if j <= haplotypes:
+                    bedFile.write("\t" + k + "\t" + str(v))
+                else:
+                    leftovers += v
+
+# if there aren't enough distinct haplotypes, pad with NAs
+            for x in range(j, haplotypes):
+                bedFile.write("\tNA\t0")
+
+            bedFile.write("\t" + str(leftovers) + "\n")
+        
+
+        bedFile.close()
+
     # sort and index the output files.
     pysam.sort("-o", outFileSorted, outFile)
     pysam.index(outFileSorted, outFileSorted + ".bai")
@@ -225,14 +299,21 @@ if __name__ == "__main__":
     halfway=False
     parser.add_argument('-f', '--fifty_percent', dest='halfway', help="Keeps reads that span to halfway through a region", action='store_true')
 
+    parser.add_argument('-p', '--haplotypes', dest='N', help="Returns the N most common haplotypes for each amplicon, and their counts", type=int, default=0)
+
+    parser.add_argument('-c', '--homopolymer_compress', dest='homopolymerCompress', help="Compresses homopolymers", action='store_true')
+
     results = parser.parse_known_args(sys.argv[1:])[0]
+    args = parser.parse_known_args(sys.argv[1:])[1]
+
     halfway = results.halfway
+    homopolymerCompression = results.homopolymerCompress
+    haplotypes = results.N
 
-    if halfway:
-        args = sys.argv[2:]
-    else:
-        args = sys.argv[1:]
 
+    if homopolymerCompression and haplotypes == 0:
+        parser.print_help()
+        die("If you want to compress homopolymers, you need to also select some number of haplotypes to output")
 
     if (len(args) < 2):
         parser.print_help()
