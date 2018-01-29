@@ -11,4 +11,14 @@ Also, a bed file (PrecisionID_mtDNA_WG_targets.bed) is required. This file gives
 Run: <br>
 python3 pycision.py <br>
 To get a description of how to use this program...
+<br><br>
 
+###Quick start
+Here's an example:
+
+python3 pycision.py  -q 4 -p 2 ../PrecisionID_mtDNA_WG_targets.bed  10_S17_L001.sorted.bam
+
+This will use a minimum mapping quality of 4, and return the top 2 most frequent haplotypes for each amplicon in the above bam file. The bam file should be sorted and indexed prior to use.
+<br>
+A separate bam file will be made that has been trimmed to just the reads that span the entirety of the amplicons described in the bed file.
+<br>
