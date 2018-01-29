@@ -33,6 +33,9 @@ VERSION = 0.001
 
 haplotypes=0
 homopolymerCompression=False
+# ignore low mapping quality 
+# 4 is the apparent default on the Ion
+minimumMappingQuality=4
 
 def die(message=''):
     sys.stderr.write( message + os.linesep + "Version number: " + str(VERSION) + os.linesep + "Oops! Correct usage:" + os.linesep + sys.argv[0] + " bedFile bamFile1 (...)" + os.linesep )
@@ -183,6 +186,9 @@ def softclipBam(bamFile, bedRecs, halfway):
         if (read.is_unmapped):
             continue
 
+        if read.mapping_quality < minimumMappingQuality:
+            continue
+
         if (read.pos < previousStart):
             die("File: " + bamFile + " does not appear to be sorted!" + read.pos + " vs " + previousStart)
 
@@ -217,7 +223,7 @@ def softclipBam(bamFile, bedRecs, halfway):
 
                         hap = ''.join(c for c in out)
                         
-                    if haplotypeDictionary[i].has_key(hap):
+                    if hap in haplotypeDictionary[i]:
                         haplotypeDictionary[i][hap] += 1
                     else:
                         haplotypeDictionary[i][hap] = 1
@@ -264,7 +270,7 @@ def softclipBam(bamFile, bedRecs, halfway):
 
         for i in range(0, bedLen):
             rec = bedRecs[i]
-            bedFile.write(rec[0] + "\t" + str(rec[1]) + "\t" + str(rec[2]) + "\t" + bamFile)
+            bedFile.write(rec[0] + "\t" + str(rec[1]-1) + "\t" + str(rec[2]) + "\t" + bamFile)
             haps = sorted(haplotypeDictionary[i].items(), key=operator.itemgetter(1), reverse=True)
 
 
@@ -303,13 +309,15 @@ if __name__ == "__main__":
 
     parser.add_argument('-c', '--homopolymer_compress', dest='homopolymerCompress', help="Compresses homopolymers", action='store_true')
 
+    parser.add_argument('-q', '--quality', dest='Q', help="Only retains reads with a minimum mapping quality of Q in the final output", type=int, default=1)
+
     results = parser.parse_known_args(sys.argv[1:])[0]
     args = parser.parse_known_args(sys.argv[1:])[1]
 
     halfway = results.halfway
     homopolymerCompression = results.homopolymerCompress
     haplotypes = results.N
-
+    minimumMappingQuality = results.Q
 
     if homopolymerCompression and haplotypes == 0:
         parser.print_help()
