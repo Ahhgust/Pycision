@@ -14,7 +14,7 @@ python3 pycision.py <br>
 To get a description of how to use this program...
 <br><br>
 
-###Quick start <br>
+### Quick start <br>
 Here's an example:
 
 python3 pycision.py  -q 4 -p 2 ../PrecisionID_mtDNA_WG_targets.bed  10_S17_L001.sorted.bam
